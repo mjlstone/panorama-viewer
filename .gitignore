@@ -1,0 +1,23 @@
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Windows 保留名文件（误生成时忽略）
+nul
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 不要把你的全景照片提交到仓库（私人内容 + 体积大）
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.heic
+
+# 但保留 App 图标（被 git add -f 强制加入）
+!icons/**

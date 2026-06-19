@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0e1116">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="全景浏览">
+<meta name="description" content="在手机上浏览 360° 全景照片，离线可用。">
+<link rel="manifest" href="manifest.json">
+<!-- iOS 图标 -->
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/favicon-32.png">
+<title>360° 全景照片浏览器</title>
+<!-- Pannellum: 轻量级全景查看库（已下载到本地 lib/，无需联网） -->
+<link rel="stylesheet" href="lib/pannellum.css" />
+<script src="lib/pannellum.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #0e1116;
+    color: #e6edf3;
+    overflow: hidden;
+  }
+
+  /* 顶部工具栏 */
+  .toolbar {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px;
+    padding-top: max(12px, env(safe-area-inset-top)); /* 适配刘海屏 */
+    background: linear-gradient(180deg, rgba(14,17,22,.92), rgba(14,17,22,.65) 70%, transparent);
+    pointer-events: none; /* 让子元素单独可点 */
+  }
+  .toolbar > * { pointer-events: auto; }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: .5px;
+    margin-right: auto;
+  }
+  .brand .dot {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: conic-gradient(from 0deg, #4ea1ff, #8a5cff, #ff5cb3, #4ea1ff);
+    box-shadow: 0 0 12px rgba(78,161,255,.6);
+  }
+
+  /* 按钮 */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: 1px solid rgba(255,255,255,.14);
+    background: rgba(255,255,255,.06);
+    color: #e6edf3;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background .15s, border-color .15s, transform .05s;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .btn:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.25); }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary {
+    background: linear-gradient(135deg, #3b82f6, #6d4aff);
+    border-color: transparent;
+    font-weight: 600;
+  }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn .icon { font-size: 15px; line-height: 1; }
+
+  /* 投放区 / 启动页 */
+  #dropzone {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: radial-gradient(1200px 600px at 50% 20%, rgba(78,161,255,.12), transparent),
+                radial-gradient(900px 500px at 70% 80%, rgba(138,92,255,.12), transparent),
+                #0e1116;
+    z-index: 5;
+    transition: opacity .3s;
+  }
+  #dropzone.hidden { opacity: 0; pointer-events: none; }
+
+  .drop-card {
+    width: min(560px, 92vw);
+    border: 2px dashed rgba(255,255,255,.18);
+    border-radius: 18px;
+    padding: 48px 32px;
+    text-align: center;
+    background: rgba(255,255,255,.03);
+    transition: border-color .2s, background .2s, transform .2s;
+  }
+  #dropzone.dragover .drop-card {
+    border-color: #4ea1ff;
+    background: rgba(78,161,255,.10);
+    transform: scale(1.01);
+  }
+  .drop-card .globe {
+    font-size: 64px;
+    margin-bottom: 8px;
+    filter: drop-shadow(0 6px 18px rgba(78,161,255,.35));
+    animation: spin 12s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .drop-card h1 {
+    font-size: 24px;
+    margin-bottom: 8px;
+    background: linear-gradient(90deg, #4ea1ff, #8a5cff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .drop-card p.sub { color: #9aa4b2; font-size: 14px; margin-bottom: 24px; line-height: 1.6; }
+
+  .hint {
+    margin-top: 18px;
+    font-size: 12px;
+    color: #6c7686;
+    line-height: 1.7;
+  }
+  .hint code {
+    background: rgba(255,255,255,.08);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: #c9d4e3;
+  }
+
+  /* 全景容器 */
+  #viewer {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    visibility: hidden;
+  }
+
+  /* 底部控制面板 */
+  .panel {
+    position: fixed;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%);
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 12px 18px;
+    background: rgba(20,24,30,.85);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.45);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .25s;
+  }
+  .panel.show { opacity: 1; pointer-events: auto; }
+
+  .ctl { display: flex; flex-direction: column; gap: 4px; }
+  .ctl label {
+    font-size: 11px;
+    color: #9aa4b2;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  .ctl input[type=range] {
+    -webkit-appearance: none;
+    width: 120px;
+    height: 4px;
+    background: rgba(255,255,255,.18);
+    border-radius: 4px;
+    outline: none;
+  }
+  .ctl input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    background: #4ea1ff;
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: 0 0 0 4px rgba(78,161,255,.18);
+  }
+  .ctl input[type=range]::-moz-range-thumb {
+    width: 14px; height: 14px;
+    background: #4ea1ff;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+  }
+  .val { font-size: 11px; color: #c9d4e3; min-width: 34px; text-align: right; }
+
+  .divider { width: 1px; height: 30px; background: rgba(255,255,255,.12); }
+
+  .icon-btn {
+    width: 36px; height: 36px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid rgba(255,255,255,.12);
+    background: rgba(255,255,255,.05);
+    color: #e6edf3;
+    border-radius: 9px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background .15s;
+  }
+  .icon-btn:hover { background: rgba(255,255,255,.13); }
+  .icon-btn.active { background: rgba(78,161,255,.22); border-color: rgba(78,161,255,.5); }
+
+  /* 信息标签 */
+  .meta {
+    position: fixed;
+    top: 64px; right: 16px;
+    z-index: 9;
+    font-size: 11px;
+    color: #9aa4b2;
+    background: rgba(20,24,30,.7);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 8px;
+    padding: 6px 10px;
+    opacity: 0;
+    transition: opacity .25s;
+  }
+  .meta.show { opacity: 1; }
+
+  /* 提示 toast */
+  #toast {
+    position: fixed;
+    top: 64px; left: 50%;
+    transform: translateX(-50%) translateY(-10px);
+    z-index: 20;
+    background: rgba(220,60,60,.92);
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-size: 13px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .25s, transform .25s;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  @media (max-width: 640px) {
+    .panel { gap: 10px; padding: 10px 12px; flex-wrap: wrap; justify-content: center; max-width: 94vw; }
+    .ctl input[type=range] { width: 88px; }
+    .brand span.txt { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 顶部工具栏 -->
+<div class="toolbar">
+  <div class="brand">
+    <div class="dot"></div>
+    <span class="txt">360° 全景浏览器</span>
+  </div>
+  <input type="file" id="fileInput" accept="image/*" hidden>
+  <button class="btn primary" id="openBtn">
+    <span class="icon">📁</span><span>打开图片</span>
+  </button>
+  <button class="btn" id="demoBtn">
+    <span class="icon">🗺️</span><span>示例</span>
+  </button>
+  <button class="btn" id="installBtn" style="display:none">
+    <span class="icon">📲</span><span>安装到桌面</span>
+  </button>
+</div>
+
+<!-- 启动 / 拖拽页 -->
+<div id="dropzone">
+  <div class="drop-card">
+    <div class="globe">🌍</div>
+    <h1>360° 全景照片浏览器</h1>
+    <p class="sub">
+      将无人机拍摄的宽幅全景图（等距柱状投影 / Equirectangular）<br>
+      拖到此处，或点击下方按钮选择文件
+    </p>
+    <button class="btn primary" id="openBtn2">
+      <span class="icon">📁</span><span>选择全景照片</span>
+    </button>
+    <div class="hint">
+      支持 JPG / PNG / WEBP · 推荐宽高比 <code>2:1</code>（如 8000×4000）<br>
+      所有处理均在本地浏览器完成，图片不会上传到服务器<br>
+      <span id="installHint" style="display:none;color:#4ea1ff">
+        💡 提示：点击浏览器菜单「添加到主屏幕」，即可像 App 一样离线使用
+      </span>
+    </div>
+  </div>
+</div>
+
+<!-- 全景查看器 -->
+<div id="viewer"></div>
+
+<!-- 信息 -->
+<div class="meta" id="meta"></div>
+
+<!-- 控制面板 -->
+<div class="panel" id="panel">
+  <div class="ctl">
+    <label>视野 FOV</label>
+    <div style="display:flex;align-items:center;gap:8px">
+      <input type="range" id="fovRange" min="30" max="110" step="1" value="75">
+      <span class="val" id="fovVal">75°</span>
+    </div>
+  </div>
+  <div class="divider"></div>
+  <div class="ctl">
+    <label>水平视角</label>
+    <div style="display:flex;align-items:center;gap:8px">
+      <input type="range" id="yawRange" min="-180" max="180" step="1" value="0">
+      <span class="val" id="yawVal">0°</span>
+    </div>
+  </div>
+  <div class="divider"></div>
+  <button class="icon-btn" id="autoBtn" title="自动旋转">⟳</button>
+  <button class="icon-btn" id="resetBtn" title="复位视角">🎯</button>
+  <button class="icon-btn" id="fsBtn" title="全屏">⛶</button>
+  <button class="icon-btn" id="newBtn" title="换一张">🔁</button>
+</div>
+
+<!-- toast -->
+<div id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var dropzone = document.getElementById('dropzone');
+  var fileInput = document.getElementById('fileInput');
+  var viewerEl   = document.getElementById('viewer');
+  var panel  = document.getElementById('panel');
+  var meta   = document.getElementById('meta');
+  var toast  = document.getElementById('toast');
+
+  var viewer = null;          // Pannellum 实例
+  var currentDataURL = null;  // 当前图片的 ObjectURL
+  var autoRotate = false;
+
+  /* ---------- 工具函数 ---------- */
+  function showToast(msg, ms) {
+    toast.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(function () { toast.classList.remove('show'); }, ms || 3000);
+  }
+
+  function openPicker() { fileInput.click(); }
+
+  function isProbablyPanorama(img) {
+    // 启发式判断：宽高比 ≥ 1.6 视为全景图
+    var ratio = img.naturalWidth / img.naturalHeight;
+    return ratio >= 1.6;
+  }
+
+  /* ---------- 核心：加载图片到全景查看器 ---------- */
+  function loadFromFile(file) {
+    if (!file || !file.type.startsWith('image/')) {
+      showToast('请选择有效的图片文件（JPG / PNG / WEBP）');
+      return;
+    }
+    var url = URL.createObjectURL(file);
+    // 先读取尺寸做校验
+    var probe = new Image();
+    probe.onload = function () {
+      var w = probe.naturalWidth, h = probe.naturalHeight;
+      meta.textContent = file.name + '  ·  ' + w + ' × ' + h +
+                         '  ·  比例 ' + (w/h).toFixed(2) + ' : 1';
+      if (!isProbablyPanorama(probe)) {
+        showToast('提示：该图片宽高比偏小，可能不是标准全景图，但已尝试显示', 4000);
+      }
+      startViewer(url);
+    };
+    probe.onerror = function () { showToast('无法读取该图片'); };
+    probe.src = url;
+  }
+
+  function loadFromURL(url, name) {
+    var probe = new Image();
+    probe.onload = function () {
+      var w = probe.naturalWidth, h = probe.naturalHeight;
+      meta.textContent = (name || '示例') + '  ·  ' + w + ' × ' + h;
+      startViewer(url);
+    };
+    probe.onerror = function () { showToast('示例图片加载失败，请检查网络'); };
+    probe.crossOrigin = 'anonymous';
+    probe.src = url;
+  }
+
+  function startViewer(imageURL) {
+    // 释放上一张
+    if (currentDataURL && currentDataURL.indexOf('blob:') === 0) {
+      URL.revokeObjectURL(currentDataURL);
+    }
+    currentDataURL = imageURL;
+
+    // 销毁旧实例
+    if (viewer) {
+      try { viewer.destroy(); } catch (e) {}
+      viewer = null;
+    }
+
+    dropzone.classList.add('hidden');
+    viewerEl.style.visibility = 'visible';
+    panel.classList.add('show');
+    meta.classList.add('show');
+
+    viewer = pannellum.viewer('viewer', {
+      type: 'equirectangular',
+      panorama: imageURL,
+      autoLoad: true,
+      showControls: false,      // 用自定义面板
+      compass: false,
+      showZoomCtrl: false,
+      showFullscreenCtrl: false,
+      showFullscreenCtrlB: false,
+      minHfov: 20,
+      maxHfov: 110,
+      haov: 360,                // 水平视野：完整 360
+      vaov: 180,                // 垂直视野：完整 180
+      vOffset: 0,
+      hfov: 75,
+      yaw: 0,
+      pitch: 0,
+      friction: 0.15
+    });
+
+    // 任何加载错误都暴露出来，而不是一片空白
+    viewer.on('error', function (err) {
+      var msg = (err && err.message) ? err.message : String(err);
+      showToast('全景加载失败：' + msg, 6000);
+      console.error('[Pannellum] error:', err);
+      // 回到选择页
+      document.getElementById('newBtn').click();
+    });
+
+    viewer.on('load', function () {
+      var hfov = Math.round(viewer.getHfov());
+      var yaw = Math.round(viewer.getYaw());
+      fovRange.value = hfov; fovVal.textContent = hfov + '°';
+      yawRange.value = yaw;  yawVal.textContent = yaw + '°';
+    });
+
+    // 用户拖动全景图时，同步面板上的滑块
+    viewer.on('mouseup', syncFromViewer);
+    viewer.on('zoomchange', function () {
+      var hfov = Math.round(viewer.getHfov());
+      fovRange.value = hfov; fovVal.textContent = hfov + '°';
+    });
+  }
+
+  function syncFromViewer() {
+    if (!viewer) return;
+    var yaw = Math.round(viewer.getYaw());
+    var hfov = Math.round(viewer.getHfov());
+    yawRange.value = yaw;  yawVal.textContent = yaw + '°';
+    fovRange.value = hfov; fovVal.textContent = hfov + '°';
+  }
+
+  /* ---------- 事件绑定 ---------- */
+  document.getElementById('openBtn').addEventListener('click', openPicker);
+  document.getElementById('openBtn2').addEventListener('click', openPicker);
+  fileInput.addEventListener('change', function (e) {
+    if (e.target.files && e.target.files[0]) loadFromFile(e.target.files[0]);
+    fileInput.value = ''; // 允许重复选择同一文件
+  });
+
+  // 拖拽
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    dropzone.addEventListener(ev, function (e) {
+      e.preventDefault(); e.stopPropagation();
+      dropzone.classList.add('dragover');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    dropzone.addEventListener(ev, function (e) {
+      e.preventDefault(); e.stopPropagation();
+      dropzone.classList.remove('dragover');
+    });
+  });
+  dropzone.addEventListener('drop', function (e) {
+    var f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) loadFromFile(f);
+  });
+
+  // 示例图（Pannellum 官方公开测试全景图）
+  document.getElementById('demoBtn').addEventListener('click', function () {
+    loadFromURL(
+      'https://pannellum.org/images/alma.jpg',
+      'ALMA 天文台（示例）'
+    );
+  });
+
+  // FOV 滑块
+  var fovRange = document.getElementById('fovRange');
+  var fovVal   = document.getElementById('fovVal');
+  fovRange.addEventListener('input', function () {
+    fovVal.textContent = fovRange.value + '°';
+    if (viewer) viewer.setHfov(parseFloat(fovRange.value));
+  });
+
+  // 水平角度滑块
+  var yawRange = document.getElementById('yawRange');
+  var yawVal   = document.getElementById('yawVal');
+  yawRange.addEventListener('input', function () {
+    yawVal.textContent = yawRange.value + '°';
+    if (viewer) viewer.setYaw(parseFloat(yawRange.value));
+  });
+
+  // 自动旋转
+  document.getElementById('autoBtn').addEventListener('click', function () {
+    if (!viewer) return;
+    autoRotate = !autoRotate;
+    this.classList.toggle('active', autoRotate);
+    if (autoRotate) {
+      viewer.startAutoRotate(8); // 8 度/秒
+    } else {
+      viewer.stopAutoRotate();
+    }
+  });
+
+  // 复位
+  document.getElementById('resetBtn').addEventListener('click', function () {
+    if (!viewer) return;
+    viewer.setYaw(0);
+    viewer.setPitch(0);
+    viewer.setHfov(75);
+    fovRange.value = 75; fovVal.textContent = '75°';
+    yawRange.value = 0;  yawVal.textContent = '0°';
+  });
+
+  // 全屏
+  document.getElementById('fsBtn').addEventListener('click', function () {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen();
+    } else {
+      document.exitFullscreen();
+    }
+  });
+
+  // 换一张
+  document.getElementById('newBtn').addEventListener('click', function () {
+    dropzone.classList.remove('hidden');
+    panel.classList.remove('show');
+    meta.classList.remove('show');
+    viewerEl.style.visibility = 'hidden';
+    if (viewer) { try { viewer.destroy(); } catch (e) {} viewer = null; }
+  });
+
+  // 滚轮缩放（Pannellum 自带，无需额外处理）
+  // 键盘快捷键
+  document.addEventListener('keydown', function (e) {
+    if (!viewer) return;
+    var hfov = viewer.getHfov();
+    var yaw  = viewer.getYaw();
+    switch (e.key) {
+      case '+': case '=': viewer.setHfov(Math.max(20, hfov - 5)); break;
+      case '-': viewer.setHfov(Math.min(110, hfov + 5)); break;
+      case 'ArrowLeft':  viewer.setYaw(yaw - 5); break;
+      case 'ArrowRight': viewer.setYaw(yaw + 5); break;
+      case 'ArrowUp':    viewer.setPitch(viewer.getPitch() + 3); break;
+      case 'ArrowDown':  viewer.setPitch(viewer.getPitch() - 3); break;
+      case 'r': case 'R': document.getElementById('resetBtn').click(); break;
+    }
+    syncFromViewer();
+  });
+
+  /* ---------- PWA：Service Worker 注册 ---------- */
+  // 仅在 https/localhost 下生效
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').then(function (reg) {
+        console.log('[PWA] Service Worker 已注册', reg.scope);
+      }).catch(function (err) {
+        console.warn('[PWA] Service Worker 注册失败（在 file:// 下正常，部署到 https 后即可）:', err);
+      });
+    });
+  }
+})();
+</script>
+<script>
+  /* ---------- PWA：安装提示（beforeinstallprompt）---------- */
+  // Android Chrome / Edge 桌面等会触发；iOS Safari 需手动「添加到主屏幕」
+  (function () {
+    var deferred = null;
+    var btn = document.getElementById('installBtn');
+    var hint = document.getElementById('installHint');
+
+    window.addEventListener('beforeinstallprompt', function (e) {
+      e.preventDefault();
+      deferred = e;
+      btn.style.display = '';
+      if (hint) hint.style.display = '';
+    });
+
+    btn.addEventListener('click', function () {
+      if (!deferred) return;
+      deferred.prompt();
+      deferred.userChoice.then(function () {
+        deferred = null;
+        btn.style.display = 'none';
+      });
+    });
+
+    window.addEventListener('appinstalled', function () {
+      btn.style.display = 'none';
+      console.log('[PWA] 已安装到主屏幕');
+    });
+
+    // iOS 不支持 beforeinstallprompt，给个提示
+    if (/iphone|ipad|ipod/i.test(navigator.userAgent) && hint) {
+      hint.style.display = '';
+      hint.innerHTML = '💡 iPhone 用户：点击 Safari 底部分享按钮 <b>「添加到主屏幕」</b>，即可像 App 一样离线使用';
+    }
+  })();
+</script>
+</body>
+</html>
