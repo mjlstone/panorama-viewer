@@ -240,6 +240,30 @@
   }
   .meta.show { opacity: 1; }
 
+  /* 权限提示横幅（小米等安卓 App 模式下显示） */
+  .perm-banner {
+    position: fixed;
+    top: 60px; left: 12px; right: 12px;
+    z-index: 11;
+    background: linear-gradient(135deg, rgba(255,170,40,.96), rgba(255,120,40,.96));
+    color: #1a1a1a;
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-size: 13px;
+    line-height: 1.55;
+    box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    display: none;
+  }
+  .perm-banner.show { display: block; }
+  .perm-banner b { font-weight: 600; }
+  .perm-banner .x {
+    position: absolute; top: 6px; right: 10px;
+    background: none; border: none; color: #1a1a1a;
+    font-size: 18px; line-height: 1; cursor: pointer; opacity: .6;
+    padding: 2px 6px;
+  }
+  .perm-banner .x:hover { opacity: 1; }
+
   /* 提示 toast */
   #toast {
     position: fixed;
@@ -340,6 +364,16 @@
 <!-- toast -->
 <div id="toast"></div>
 
+<!-- 权限提示横幅（仅在安卓 App 模式 + 可能缺权限时显示） -->
+<div class="perm-banner" id="permBanner">
+  <button class="x" id="permBannerClose" aria-label="关闭">×</button>
+  <b>📱 选不到照片？这是手机权限问题，不是 App 故障。</b><br>
+  请到系统设置里授权：<br>
+  <b>设置 → 应用设置 → 应用管理 → 全景浏览 → 权限管理</b>，<br>
+  把「<b>照片和视频</b>」「<b>读写手机存储</b>」都设为<b>允许</b>，<br>
+  然后把 App 从后台彻底划掉，重新打开即可。
+</div>
+
 <script>
 (function () {
   "use strict";
@@ -355,6 +389,23 @@
   var currentDataURL = null;  // 当前图片的 ObjectURL
   var autoRotate = false;
 
+  // 判断是否以「安装态 App」运行（standalone）
+  // 三种检测方式任一命中即视为 App 模式
+  function isStandalone() {
+    return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+           (window.matchMedia && window.matchMedia('(display-mode: fullscreen)').matches) ||
+           window.navigator.standalone === true;
+  }
+  var STANDALONE = isStandalone();
+
+  var permBanner = document.getElementById('permBanner');
+  var permBannerClose = document.getElementById('permBannerClose');
+  // 关闭横幅
+  permBannerClose.addEventListener('click', function () {
+    permBanner.classList.remove('show');
+  });
+  function showPermBanner() { permBanner.classList.add('show'); }
+
   /* ---------- 工具函数 ---------- */
   function showToast(msg, ms) {
     toast.textContent = msg;
@@ -362,7 +413,25 @@
     setTimeout(function () { toast.classList.remove('show'); }, ms || 3000);
   }
 
-  function openPicker() { fileInput.click(); }
+  // 打开文件选择器；在 App 模式下，若超时未响应则提示权限问题
+  var pickerOpenedAt = 0;
+  var pickerTimer = null;
+  function openPicker() {
+    pickerOpenedAt = Date.now();
+    // App 模式：如果 6 秒还没收到 change（多半是权限被拒/无响应），提示
+    if (pickerTimer) clearTimeout(pickerTimer);
+    if (STANDALONE) {
+      pickerTimer = setTimeout(function () {
+        showPermBanner();
+        showToast('未能打开相册，请按上方提示授权后重试', 5000);
+      }, 6000);
+    }
+    try {
+      fileInput.click();
+    } catch (e) {
+      showPermBanner();
+    }
+  }
 
   function isProbablyPanorama(img) {
     // 启发式判断：宽高比 ≥ 1.6 视为全景图
@@ -478,9 +547,28 @@
   document.getElementById('openBtn').addEventListener('click', openPicker);
   document.getElementById('openBtn2').addEventListener('click', openPicker);
   fileInput.addEventListener('change', function (e) {
-    if (e.target.files && e.target.files[0]) loadFromFile(e.target.files[0]);
+    if (pickerTimer) { clearTimeout(pickerTimer); pickerTimer = null; }
+    var f = e.target.files && e.target.files[0];
+    if (f) {
+      loadFromFile(f);
+    } else {
+      // 用户取消选择，或 App 模式下权限被拒导致返回空
+      if (STANDALONE) {
+        showPermBanner();
+        showToast('没有获取到照片，请按上方提示授权后重试', 4500);
+      }
+    }
     fileInput.value = ''; // 允许重复选择同一文件
   });
+
+  // App 模式下首次进入：主动提示一次权限授权（仅一次，可关闭）
+  if (STANDALONE && !localStorage.getItem('permTipShown')) {
+    // 稍延迟，让启动页先渲染出来
+    setTimeout(function () {
+      showPermBanner();
+      localStorage.setItem('permTipShown', '1');
+    }, 500);
+  }
 
   // 拖拽
   ['dragenter', 'dragover'].forEach(function (ev) {
