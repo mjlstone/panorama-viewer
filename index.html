@@ -219,10 +219,34 @@
     border-radius: 9px;
     cursor: pointer;
     font-size: 16px;
-    transition: background .15s;
+    transition: background .15s, border-color .15s, transform .1s;
   }
   .icon-btn:hover { background: rgba(255,255,255,.13); }
   .icon-btn.active { background: rgba(78,161,255,.22); border-color: rgba(78,161,255,.5); }
+  .icon-btn.highlight {
+    background: rgba(78,161,255,.15);
+    border-color: rgba(78,161,255,.4);
+  }
+  .icon-btn.highlight:hover {
+    background: rgba(78,161,255,.28);
+    border-color: rgba(78,161,255,.7);
+    box-shadow: 0 0 12px rgba(78,161,255,.45);
+  }
+
+  /* 截屏快门闪光动效 */
+  .shutter-flash {
+    position: fixed;
+    inset: 0;
+    background: #ffffff;
+    opacity: 0.65;
+    z-index: 9999;
+    pointer-events: none;
+    animation: flash-fade 0.35s cubic-bezier(0.1, 0.9, 0.2, 1) forwards;
+  }
+  @keyframes flash-fade {
+    0% { opacity: 0.65; }
+    100% { opacity: 0; }
+  }
 
   /* 信息标签 */
   .meta {
@@ -357,6 +381,7 @@
   <div class="divider"></div>
   <button class="icon-btn" id="autoBtn" title="自动旋转">⟳</button>
   <button class="icon-btn" id="resetBtn" title="复位视角">🎯</button>
+  <button class="icon-btn highlight" id="snapshotBtn" title="一键截屏保存 (超清 JPEG · 快捷键 S)">📸</button>
   <button class="icon-btn" id="fsBtn" title="全屏">⛶</button>
   <button class="icon-btn" id="newBtn" title="换一张">🔁</button>
 </div>
@@ -387,6 +412,8 @@
 
   var viewer = null;          // Pannellum 实例
   var currentDataURL = null;  // 当前图片的 ObjectURL
+  var currentPanoImage = null; // 当前原始图像 Image 对象，用于超清渲染截屏
+  var currentPanoBaseName = '全景图'; // 当前文件基础名称
   var autoRotate = false;
 
   // 判断是否以「安装态 App」运行（standalone）
@@ -445,10 +472,12 @@
       showToast('请选择有效的图片文件（JPG / PNG / WEBP）');
       return;
     }
+    currentPanoBaseName = file.name.replace(/\.[^/.]+$/, "");
     var url = URL.createObjectURL(file);
     // 先读取尺寸做校验
     var probe = new Image();
     probe.onload = function () {
+      currentPanoImage = probe;
       var w = probe.naturalWidth, h = probe.naturalHeight;
       meta.textContent = file.name + '  ·  ' + w + ' × ' + h +
                          '  ·  比例 ' + (w/h).toFixed(2) + ' : 1';
@@ -462,8 +491,10 @@
   }
 
   function loadFromURL(url, name) {
+    currentPanoBaseName = (name || '示例').replace(/\.[^/.]+$/, "");
     var probe = new Image();
     probe.onload = function () {
+      currentPanoImage = probe;
       var w = probe.naturalWidth, h = probe.naturalHeight;
       meta.textContent = (name || '示例') + '  ·  ' + w + ' × ' + h;
       startViewer(url);
@@ -652,6 +683,351 @@
     if (viewer) { try { viewer.destroy(); } catch (e) {} viewer = null; }
   });
 
+  // 一键超清截屏
+  document.getElementById('snapshotBtn').addEventListener('click', takeSnapshot);
+
+  // 格式化时间戳 YYYYMMDD_HHMMSS
+  function formatTimestamp() {
+    var d = new Date();
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    return '' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '_' +
+           pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+  }
+
+  // 触发原生下载
+  function triggerDownload(blob, filename, sizeText) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      if (a.parentNode) a.parentNode.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1500);
+    showToast('📸 超清视角照片已保存' + sizeText, 3500);
+  }
+
+  // 保存图片 Blob（优先系统相册分享，回退到自动下载）
+  function saveBlobAsFile(blob, filename, w, h) {
+    var sizeText = (w && h) ? (' (' + w + '×' + h + ')') : '';
+
+    var file = null;
+    try {
+      file = new File([blob], filename, { type: 'image/jpeg' });
+    } catch (e) {}
+
+    // 移动端优先通过原生分享接口，可一键存入手机系统相册
+    if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({
+        files: [file],
+        title: '全景视角照片',
+        text: '全景照片截图' + sizeText
+      }).then(function () {
+        showToast('📸 照片已保存/已分享' + sizeText, 3500);
+      }).catch(function (err) {
+        if (err.name !== 'AbortError') {
+          triggerDownload(blob, filename, sizeText);
+        }
+      });
+      return;
+    }
+
+    triggerDownload(blob, filename, sizeText);
+  }
+
+  // 截屏保底机制：从当前活动的 Pannellum Canvas 直接捕获
+  function fallbackSnapshot() {
+    try {
+      var renderer = viewer.getRenderer();
+      var canvas = renderer.getCanvas();
+      var pitchRad = viewer.getPitch() * Math.PI / 180;
+      var yawRad   = viewer.getYaw() * Math.PI / 180;
+      var hfovRad  = viewer.getHfov() * Math.PI / 180;
+
+      // 立即触发渲染以刷新 drawingBuffer
+      renderer.render(pitchRad, yawRad, hfovRad);
+
+      // 同步复制到 2D Canvas，防止 WebGL drawingBuffer 随后被浏览器合成清空
+      var snapCanvas = document.createElement('canvas');
+      snapCanvas.width = canvas.width;
+      snapCanvas.height = canvas.height;
+      var ctx = snapCanvas.getContext('2d');
+      ctx.drawImage(canvas, 0, 0);
+
+      snapCanvas.toBlob(function (blob) {
+        if (!blob) {
+          showToast('截屏失败，请稍后重试');
+          return;
+        }
+        var timestamp = formatTimestamp();
+        var outName = (currentPanoBaseName || '全景视角') + '_' + timestamp + '.jpg';
+        saveBlobAsFile(blob, outName, snapCanvas.width, snapCanvas.height);
+      }, 'image/jpeg', 0.95);
+    } catch (e) {
+      console.error('截屏保底失败:', e);
+      showToast('截屏失败: ' + (e.message || '未知错误'));
+    }
+  }
+
+  // 超高清离屏渲染（保持原图采样率，极限清晰度，最高 4K）
+  function generateHighResJPEG(callback) {
+    if (!viewer) { callback(null); return; }
+
+    var renderer = viewer.getRenderer();
+    var viewerCanvas = renderer ? renderer.getCanvas() : null;
+    var aspect = (viewerCanvas && viewerCanvas.clientHeight) ?
+                 (viewerCanvas.clientWidth / viewerCanvas.clientHeight) : (window.innerWidth / window.innerHeight);
+
+    var pitch = viewer.getPitch();
+    var yaw   = viewer.getYaw();
+    var hfov  = viewer.getHfov();
+
+    if (!currentPanoImage || !currentPanoImage.naturalWidth) {
+      callback(null);
+      return;
+    }
+
+    // 创建离屏 WebGL 上下文
+    var offCanvas = document.createElement('canvas');
+    var gl = offCanvas.getContext('webgl', { preserveDrawingBuffer: true, alpha: false }) ||
+             offCanvas.getContext('experimental-webgl', { preserveDrawingBuffer: true, alpha: false });
+
+    if (!gl) {
+      console.warn('[Snapshot] 无法创建离屏 WebGL 上下文');
+      callback(null);
+      return;
+    }
+
+    // 计算超高清分辨率：最高达 4K (3840px 宽度)，自适应原图和显卡极限
+    var origW = currentPanoImage.naturalWidth;
+    var targetW = 3840;
+    var sensibleMaxW = Math.max(2048, Math.round(origW * (hfov / 360) * 1.8));
+    targetW = Math.min(targetW, sensibleMaxW);
+    if (viewerCanvas) targetW = Math.max(targetW, viewerCanvas.width);
+
+    var maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096;
+    var maxView = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+    var maxLimit = Math.min(4096, maxTex);
+    if (maxView && maxView[0]) maxLimit = Math.min(maxLimit, maxView[0]);
+
+    targetW = Math.min(targetW, maxLimit);
+    var targetH = Math.round(targetW / aspect);
+    if (targetH > maxLimit) {
+      targetH = maxLimit;
+      targetW = Math.round(targetH * aspect);
+    }
+
+    offCanvas.width = targetW;
+    offCanvas.height = targetH;
+    gl.viewport(0, 0, targetW, targetH);
+
+    // 顶点着色器
+    var vsSrc = [
+      'attribute vec2 a_texCoord;',
+      'varying vec2 v_texCoord;',
+      'void main() {',
+      '  gl_Position = vec4(a_texCoord, 0.0, 1.0);',
+      '  v_texCoord = a_texCoord;',
+      '}'
+    ].join('\n');
+
+    // 片段着色器 (等距柱状投影 -> 透视投影超清重构)
+    var fsSrc = [
+      'precision highp float;',
+      'uniform float u_aspectRatio;',
+      'uniform float u_psi;',
+      'uniform float u_theta;',
+      'uniform float u_f;',
+      'uniform float u_h;',
+      'uniform float u_v;',
+      'uniform float u_vo;',
+      'uniform float u_rot;',
+      'const float PI = 3.14159265358979323846264;',
+      'uniform sampler2D u_image0;',
+      'varying vec2 v_texCoord;',
+      'void main() {',
+      '  float x = v_texCoord.x * u_aspectRatio;',
+      '  float y = v_texCoord.y;',
+      '  float sinrot = sin(u_rot);',
+      '  float cosrot = cos(u_rot);',
+      '  float rot_x = x * cosrot - y * sinrot;',
+      '  float rot_y = x * sinrot + y * cosrot;',
+      '  float sintheta = sin(u_theta);',
+      '  float costheta = cos(u_theta);',
+      '  float a = u_f * costheta - rot_y * sintheta;',
+      '  float root = sqrt(rot_x * rot_x + a * a);',
+      '  float lambda = atan(rot_x / root, a / root) + u_psi;',
+      '  float phi = atan((rot_y * costheta + u_f * sintheta) / root);',
+      '  lambda = mod(lambda + PI, PI * 2.0) - PI;',
+      '  vec2 coord = vec2(lambda / PI, phi / (PI / 2.0));',
+      '  if (coord.x < -u_h || coord.x > u_h || coord.y < -u_v + u_vo || coord.y > u_v + u_vo) {',
+      '    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);',
+      '  } else {',
+      '    vec2 tc = vec2((coord.x + u_h) / (u_h * 2.0), (-coord.y + u_v + u_vo) / (u_v * 2.0));',
+      '    gl_FragColor = texture2D(u_image0, tc);',
+      '  }',
+      '}'
+    ].join('\n');
+
+    function createShader(type, src) {
+      var shader = gl.createShader(type);
+      gl.shaderSource(shader, src);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+        return null;
+      }
+      return shader;
+    }
+
+    var vs = createShader(gl.VERTEX_SHADER, vsSrc);
+    var fs = createShader(gl.FRAGMENT_SHADER, fsSrc);
+    if (!vs || !fs) { callback(null); return; }
+
+    var prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.error('Program link error:', gl.getProgramInfoLog(prog));
+      callback(null);
+      return;
+    }
+    gl.useProgram(prog);
+
+    // 顶点数据（全屏四边形）
+    var vertBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1,  1,
+       1,  1,
+       1, -1,
+      -1,  1,
+       1, -1,
+      -1, -1
+    ]), gl.STATIC_DRAW);
+
+    var aTexCoord = gl.getAttribLocation(prog, 'a_texCoord');
+    gl.enableVertexAttribArray(aTexCoord);
+    gl.vertexAttribPointer(aTexCoord, 2, gl.FLOAT, false, 0, 0);
+
+    // 视角几何计算
+    var hfovRad = hfov * Math.PI / 180;
+    var vfovRad = 2 * Math.atan(Math.tan(0.5 * hfovRad) / (targetW / targetH));
+    var fVal = 1 / Math.tan(0.5 * vfovRad);
+
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_aspectRatio'), targetW / targetH);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_psi'), yaw * Math.PI / 180);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_theta'), pitch * Math.PI / 180);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_f'), fVal);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_rot'), 0.0);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_h'), 1.0);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_v'), 1.0);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_vo'), 0.0);
+
+    // 上传全景图纹理
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    var uploadSource = currentPanoImage;
+    if (currentPanoImage.naturalWidth > maxTex || currentPanoImage.naturalHeight > maxTex) {
+      var scale = Math.min(maxTex / currentPanoImage.naturalWidth, maxTex / currentPanoImage.naturalHeight);
+      var scCanvas = document.createElement('canvas');
+      scCanvas.width = Math.floor(currentPanoImage.naturalWidth * scale);
+      scCanvas.height = Math.floor(currentPanoImage.naturalHeight * scale);
+      var scCtx = scCanvas.getContext('2d');
+      scCtx.drawImage(currentPanoImage, 0, 0, scCanvas.width, scCanvas.height);
+      uploadSource = scCanvas;
+    }
+
+    try {
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, uploadSource);
+    } catch (texErr) {
+      console.warn('纹理上传失败（可能跨域）:', texErr);
+      callback(null);
+      return;
+    }
+
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 导出最高画质 JPEG (质量 0.95)
+    offCanvas.toBlob(function (blob) {
+      try {
+        gl.deleteTexture(tex);
+        gl.deleteBuffer(vertBuffer);
+        gl.deleteProgram(prog);
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+        var ext = gl.getExtension('WEBGL_lose_context');
+        if (ext) ext.loseContext();
+      } catch (e) {}
+
+      callback(blob, targetW, targetH);
+    }, 'image/jpeg', 0.95);
+  }
+
+  // 截屏主入口
+  function takeSnapshot() {
+    if (!viewer) {
+      showToast('请先打开一张全景图片');
+      return;
+    }
+
+    var shotBtn = document.getElementById('snapshotBtn');
+    if (shotBtn) {
+      shotBtn.style.pointerEvents = 'none';
+      shotBtn.style.opacity = '0.5';
+    }
+
+    // 快门微闪动画
+    var flash = document.createElement('div');
+    flash.className = 'shutter-flash';
+    document.body.appendChild(flash);
+    setTimeout(function () {
+      if (flash.parentNode) flash.parentNode.removeChild(flash);
+    }, 380);
+
+    showToast('正在生成超清视角照片...', 1800);
+
+    setTimeout(function () {
+      function restoreBtn() {
+        if (shotBtn) {
+          shotBtn.style.pointerEvents = '';
+          shotBtn.style.opacity = '';
+        }
+      }
+
+      try {
+        generateHighResJPEG(function (blob, width, height) {
+          if (!blob) {
+            console.log('[Snapshot] 离屏超清导出不可用，平滑使用当前帧捕获');
+            fallbackSnapshot();
+            restoreBtn();
+            return;
+          }
+          var timestamp = formatTimestamp();
+          var outName = (currentPanoBaseName || '全景视角') + '_' + timestamp + '.jpg';
+          saveBlobAsFile(blob, outName, width, height);
+          restoreBtn();
+        });
+      } catch (err) {
+        console.warn('[Snapshot] 异常，回退到当前帧捕获:', err);
+        fallbackSnapshot();
+        restoreBtn();
+      }
+    }, 40);
+  }
+
   // 滚轮缩放（Pannellum 自带，无需额外处理）
   // 键盘快捷键
   document.addEventListener('keydown', function (e) {
@@ -666,6 +1042,10 @@
       case 'ArrowUp':    viewer.setPitch(viewer.getPitch() + 3); break;
       case 'ArrowDown':  viewer.setPitch(viewer.getPitch() - 3); break;
       case 'r': case 'R': document.getElementById('resetBtn').click(); break;
+      case 's': case 'S':
+      case 'c': case 'C':
+        takeSnapshot();
+        break;
     }
     syncFromViewer();
   });

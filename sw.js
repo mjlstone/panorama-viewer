@@ -1,7 +1,7 @@
 // Service Worker —— PWA 离线缓存核心
 // 策略：核心资源预缓存（cache-first），其它请求回退到网络
 
-var CACHE = 'panorama-v1';
+var CACHE = 'panorama-v2';
 
 // 应用外壳：这些资源会被预缓存，断网时也能完整加载
 var PRECACHE_URLS = [
