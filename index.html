@@ -381,7 +381,7 @@
   <div class="divider"></div>
   <button class="icon-btn" id="autoBtn" title="自动旋转">⟳</button>
   <button class="icon-btn" id="resetBtn" title="复位视角">🎯</button>
-  <button class="icon-btn highlight" id="snapshotBtn" title="一键截屏保存 (超清 JPEG · 快捷键 S)">📸</button>
+  <button class="icon-btn highlight" id="snapshotBtn" title="另存为当前视角照片 (超清 JPEG · 快捷键 S)">📸</button>
   <button class="icon-btn" id="fsBtn" title="全屏">⛶</button>
   <button class="icon-btn" id="newBtn" title="换一张">🔁</button>
 </div>
@@ -694,7 +694,7 @@
            pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
   }
 
-  // 触发原生下载
+  // 触发原生直接下载保存
   function triggerDownload(blob, filename, sizeText) {
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
@@ -707,34 +707,38 @@
       if (a.parentNode) a.parentNode.removeChild(a);
       URL.revokeObjectURL(url);
     }, 1500);
-    showToast('📸 超清视角照片已保存' + sizeText, 3500);
+    showToast('📸 照片已保存到本地' + sizeText, 3500);
   }
 
-  // 保存图片 Blob（优先系统相册分享，回退到自动下载）
-  function saveBlobAsFile(blob, filename, w, h) {
+  // 保存图片 Blob（优先唤起系统「另存为」对话框，回退到直接下载，杜绝分享弹窗）
+  async function saveBlobAsFile(blob, filename, w, h) {
     var sizeText = (w && h) ? (' (' + w + '×' + h + ')') : '';
 
-    var file = null;
-    try {
-      file = new File([blob], filename, { type: 'image/jpeg' });
-    } catch (e) {}
-
-    // 移动端优先通过原生分享接口，可一键存入手机系统相册
-    if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
-      navigator.share({
-        files: [file],
-        title: '全景视角照片',
-        text: '全景照片截图' + sizeText
-      }).then(function () {
-        showToast('📸 照片已保存/已分享' + sizeText, 3500);
-      }).catch(function (err) {
-        if (err.name !== 'AbortError') {
-          triggerDownload(blob, filename, sizeText);
+    // 1. 若支持 File System Access API（桌面 Chrome / Edge 等），直接弹出系统级「另存为」文件选择器
+    if (typeof window.showSaveFilePicker === 'function') {
+      try {
+        var handle = await window.showSaveFilePicker({
+          suggestedName: filename,
+          types: [{
+            description: 'JPEG 照片 (*.jpg)',
+            accept: { 'image/jpeg': ['.jpg', '.jpeg'] }
+          }]
+        });
+        var writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        showToast('📸 照片已成功另存为 ' + handle.name + sizeText, 3500);
+        return;
+      } catch (err) {
+        // 用户主动在“另存为”弹窗中点击了“取消”
+        if (err && err.name === 'AbortError') {
+          return;
         }
-      });
-      return;
+        console.warn('[Snapshot] showSaveFilePicker 未完成，回退到自动下载:', err);
+      }
     }
 
+    // 2. 手机端或不支持 FilePicker 的浏览器：直接下载保存到本地
     triggerDownload(blob, filename, sizeText);
   }
 
